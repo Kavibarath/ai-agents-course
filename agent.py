@@ -17,6 +17,7 @@ import sys
 from dotenv import load_dotenv
 from openai import BadRequestError, OpenAI
 
+import memory
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS, TOOLS_REQUIRING_APPROVAL
 
 load_dotenv()
@@ -27,6 +28,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 MODEL = "openai/gpt-oss-120b"  # Groq free tier, strong tool calling
 MAX_ITERATIONS = 10  # safety cap so a confused model can't loop forever
+MAX_HISTORY_MESSAGES = 30  # short-term memory window (excluding the system prompt)
 
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
@@ -44,6 +46,25 @@ SYSTEM_PROMPT = (
     "with the real numbers you found. "
     "For general knowledge questions you already know, answer directly without tools."
 )
+
+
+def _role(message) -> str:
+    return message.get("role", "") if isinstance(message, dict) else getattr(message, "role", "")
+
+
+def trim_history(messages: list) -> list:
+    """Short-term memory window: keep the system prompt + the last N messages.
+
+    The window must not start mid tool-exchange (a `tool` result whose
+    matching assistant tool_calls message was trimmed away would be an API
+    error), so advance the cut to the next user message.
+    """
+    if len(messages) <= MAX_HISTORY_MESSAGES + 1:
+        return messages
+    tail = messages[-MAX_HISTORY_MESSAGES:]
+    while tail and _role(tail[0]) != "user":
+        tail.pop(0)
+    return [messages[0]] + tail
 
 
 def _approve(name: str, args: dict) -> bool:
@@ -122,10 +143,20 @@ def run_agent(messages: list) -> str:
 
 def main() -> None:
     print("Agent — tools: calculator, datetime, web_search (Tavily), run_python (with approval).")
-    print("Type 'exit' to quit.\n")
+    print("Long-term memory: on. Type 'exit' to quit.\n")
 
-    # Conversation history persists across turns (short-term memory, Week 3 preview)
+    # Short-term memory: the running history, windowed by trim_history()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Long-term memory, part 1: inject the user profile (all facts while the
+    # store is small — semantic recall alone misses standing preferences)
+    profile = memory.load_profile()
+    if profile:
+        print(f"  [memory] loaded {len(profile)} fact(s) from past sessions")
+        messages[0]["content"] += (
+            "\n\nFacts remembered about the user from past sessions:\n"
+            + "\n".join(f"- {fact}" for fact in profile)
+        )
 
     while True:
         try:
@@ -138,9 +169,34 @@ def main() -> None:
         if user_input.lower() in {"exit", "quit"}:
             break
 
+        # Long-term memory, part 2: once the store outgrows the profile,
+        # semantically recall facts relevant to this specific question
+        recalled = []
+        if memory.total_count() > memory.PROFILE_LIMIT:
+            recalled = [f for f in memory.recall(user_input) if f not in profile]
+        if recalled:
+            for fact in recalled:
+                print(f"  [memory] {fact}")
+            messages.append({
+                "role": "system",
+                "content": "Relevant facts remembered from past sessions:\n"
+                           + "\n".join(f"- {fact}" for fact in recalled),
+            })
+
         messages.append({"role": "user", "content": user_input})
+        messages = trim_history(messages)
         answer = run_agent(messages)
         print(f"Agent: {answer}\n")
+
+    # Session over: distill it into durable facts for future sessions
+    print("Saving memories...")
+    facts = memory.extract_facts(messages, client, MODEL)
+    memory.save_facts(facts)
+    if facts:
+        for fact in facts:
+            print(f"  [saved] {fact}")
+    else:
+        print("  (nothing worth remembering this session)")
 
 
 if __name__ == "__main__":
