@@ -1,7 +1,7 @@
 # AI Agents Course — one project, built week by week
 
 A single project that grows into a full research-assistant agent over 5 weeks.
-**Current status: Week 3** — short-term + long-term memory (ChromaDB, RAG over past sessions).
+**Current status: Week 4** — multi-step research pipeline as an explicit LangGraph StateGraph.
 
 ## The core idea (Week 1)
 
@@ -35,6 +35,32 @@ metric units" is ~2.0 (unrelated), yet the preference must shape the answer. Tha
 why small stores are injected wholesale and recall only supplements later — the same
 design mem0 uses.
 
+## Research graph (Week 4)
+
+`research.py` is a **graph-based agent** — the conceptual counterpart to `agent.py`'s
+ReAct loop. We define the flow as explicit nodes and edges; the LLM only fills in
+decisions at branch points:
+
+```
+START -> search -> read_pages --(readable pages?)--> synthesize -> save -> END
+            ^                        |
+            +---- refine_query <-----+  (no pages: LLM rewrites the query, max 2 rounds)
+```
+
+- **search** — Tavily, top 8 results
+- **read_pages** — trafilatura extracts article text; unreadable pages are skipped
+- **conditional edge** — zero readable pages routes back through `refine_query`
+- **synthesize** — LLM writes a cited, structured markdown report from the sources only
+- **save** — report lands in `reports/<date>-<topic>.md`
+
+Run it standalone (`python research.py "your topic"`) or just ask the chat agent to
+"research X" — the graph is registered as the `research_topic` tool, so the dynamic
+agent delegates to the structured pipeline.
+
+**ReAct vs graphs:** the chat agent decides everything per turn (flexible, opaque);
+the graph guarantees search always precedes reading, capping retries and making every
+step debuggable. Real systems use both — exactly like this project now does.
+
 ## Setup
 
 1. Get a **free** Groq API key (no card): https://console.groq.com → API Keys
@@ -60,6 +86,7 @@ python agent.py
 | `What is the capital of France?` | **No tool call** — it decides tools aren't needed |
 | `Current population of Malta, and at 3%/year growth, what is it in 10 years?` | **Chains tools**: `web_search` for the real number, then `run_python` (you approve the code) for the projection |
 | Session 1: `Remember that I prefer metric units` → exit. Session 2: `How far is Valletta from Mdina?` | On exit: `[saved] The user prefers metric units.` On restart: `[memory] loaded 1 fact(s)` → answers in **km** without being told |
+| `Research the latest trends in health data analytics` | Delegates to the LangGraph pipeline → cited markdown report saved in `reports/`, no further input needed |
 
 The `[tool]` / `[result]` lines printed between your question and the answer are
 the Act/Observe steps of the loop, made visible.
@@ -69,5 +96,5 @@ the Act/Observe steps of the loop, made visible.
 - **Week 1 (done):** agent loop + calculator, datetime, web-search stub
 - **Week 2 (done):** real web search (Tavily) + code execution with human approval
 - **Week 3 (done):** short-term window + long-term ChromaDB memory across sessions
-- **Week 4:** multi-step orchestration with LangGraph (research assistant)
+- **Week 4 (done):** LangGraph research pipeline with conditional retry branching
 - **Week 5:** FastAPI + React frontend with reasoning trace, deployment

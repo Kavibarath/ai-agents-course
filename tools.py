@@ -121,6 +121,21 @@ def run_python(code: str) -> str:
     return output if output else "(code ran but printed nothing — use print() to output results)"
 
 
+# ---------------------------------------------------------------------------
+# Tool 5: deep research (Week 4) — delegates to the LangGraph pipeline
+# ---------------------------------------------------------------------------
+
+def research_topic(topic: str) -> str:
+    """Run the multi-step research graph (search -> read -> synthesize -> save)."""
+    from research import research  # lazy: only load LangGraph when actually used
+
+    path = research(topic)
+    return (
+        f"Research complete. A structured markdown report was saved to: {path}. "
+        "Tell the user the file path and give a 2-3 sentence summary of the topic."
+    )
+
+
 # Tools the agent loop must get human confirmation for before executing
 TOOLS_REQUIRING_APPROVAL = {"run_python"}
 
@@ -206,6 +221,29 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "research_topic",
+            "description": (
+                "Deep research on a topic: autonomously searches the web, reads the "
+                "top pages, synthesizes a structured markdown report with cited "
+                "sources, and saves it to disk. Slow (~1 minute). Use when the user "
+                "asks to 'research' something or wants a report/document — for a "
+                "quick factual lookup, use web_search instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "The research topic",
+                    }
+                },
+                "required": ["topic"],
+            },
+        },
+    },
 ]
 
 # What WE dispatch on: tool name -> callable
@@ -214,4 +252,5 @@ TOOL_FUNCTIONS = {
     "get_current_datetime": get_current_datetime,
     "web_search": web_search,
     "run_python": run_python,
+    "research_topic": research_topic,
 }

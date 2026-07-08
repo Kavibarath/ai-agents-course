@@ -11,29 +11,20 @@ No framework — every step of the loop is visible below.
 """
 
 import json
-import os
 import sys
 
-from dotenv import load_dotenv
-from openai import BadRequestError, OpenAI
+from openai import BadRequestError
 
 import memory
+from llm import MODEL, client
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS, TOOLS_REQUIRING_APPROVAL
-
-load_dotenv()
 
 # Windows consoles default to a legacy codepage (cp1252) that can't print
 # many characters web search results contain — force UTF-8.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-MODEL = "openai/gpt-oss-120b"  # Groq free tier, strong tool calling
 MAX_ITERATIONS = 10  # safety cap so a confused model can't loop forever
 MAX_HISTORY_MESSAGES = 30  # short-term memory window (excluding the system prompt)
-
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.environ["GROQ_API_KEY"],
-)
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant with tools. "
