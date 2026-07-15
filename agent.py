@@ -59,7 +59,7 @@ def trim_history(messages: list) -> list:
 
 
 def _approve(name: str, args: dict) -> bool:
-    """Show the user exactly what is about to run and ask for confirmation."""
+    """CLI approver: show the user exactly what will run, ask for confirmation."""
     print(f"\n  [approval needed] The agent wants to run {name}:")
     body = args.get("code", json.dumps(args, indent=2))
     for line in body.splitlines():
@@ -68,8 +68,25 @@ def _approve(name: str, args: dict) -> bool:
     return answer in {"y", "yes"}
 
 
-def run_agent(messages: list) -> str:
-    """Run the agent loop until the model produces a final text answer."""
+def _print_event(event: str, data: dict) -> None:
+    """CLI event sink — the web server substitutes its own (WebSocket sends)."""
+    if event == "tool_call":
+        print(f"  [tool] {data['name']}({json.dumps(data['args'])})")
+    elif event == "tool_result":
+        print(f"  [result] {data['result']}")
+    elif event == "retry":
+        print("  [retry] model produced a malformed tool call, asking again...")
+
+
+def run_agent(messages: list, on_event=None, approver=None) -> str:
+    """Run the agent loop until the model produces a final text answer.
+
+    on_event(event, data) receives the trace ("tool_call", "tool_result",
+    "retry"); approver(name, args) -> bool gates dangerous tools. Defaults
+    are the CLI implementations.
+    """
+    emit = on_event or _print_event
+    approve = approver or _approve
     for _ in range(MAX_ITERATIONS):
         # THINK: the model decides — answer directly, or request tool calls?
         # Models occasionally emit malformed tool-call syntax; Groq rejects it
@@ -85,7 +102,7 @@ def run_agent(messages: list) -> str:
             except BadRequestError as exc:
                 if "tool_use_failed" not in str(exc) or attempt == 2:
                     raise
-                print("  [retry] model produced a malformed tool call, asking again...")
+                emit("retry", {})
         message = response.choices[0].message
 
         # No tool calls -> the model chose to answer. Loop ends.
@@ -102,13 +119,13 @@ def run_agent(messages: list) -> str:
             # Parse, never string-match. Models sometimes send "" or "null"
             # instead of "{}" for no-argument tools — normalize to a dict.
             args = json.loads(tool_call.function.arguments or "{}") or {}
-            print(f"  [tool] {name}({json.dumps(args)})")
+            emit("tool_call", {"name": name, "args": args})
 
             # Human-in-the-loop: dangerous tools need explicit approval.
             # The model wrote this code — never run it blind.
-            if name in TOOLS_REQUIRING_APPROVAL and not _approve(name, args):
+            if name in TOOLS_REQUIRING_APPROVAL and not approve(name, args):
                 result = "The user declined to run this. Ask them how to proceed."
-                print("  [result] declined by user")
+                emit("tool_result", {"name": name, "result": result, "declined": True})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -120,7 +137,7 @@ def run_agent(messages: list) -> str:
                 result = TOOL_FUNCTIONS[name](**args)
             except Exception as exc:  # return errors to the model so it can recover
                 result = f"Error running {name}: {exc}"
-            print(f"  [result] {result}")
+            emit("tool_result", {"name": name, "result": result})
 
             messages.append({
                 "role": "tool",

@@ -1,7 +1,8 @@
 # AI Agents Course — one project, built week by week
 
 A single project that grows into a full research-assistant agent over 5 weeks.
-**Current status: Week 4** — multi-step research pipeline as an explicit LangGraph StateGraph.
+**Current status: Week 5 (complete)** — web UI with a live reasoning trace, FastAPI + WebSockets
+backend, optional LangSmith tracing, Docker + Render deployment.
 
 ## The core idea (Week 1)
 
@@ -61,6 +62,45 @@ agent delegates to the structured pipeline.
 the graph guarantees search always precedes reading, capping retries and making every
 step debuggable. Real systems use both — exactly like this project now does.
 
+## Web UI (Week 5)
+
+`server.py` exposes the SAME agent loop over a WebSocket — `run_agent()` takes an
+`on_event` callback and an `approver`, so the CLI and the web UI share one loop with
+different front ends. The React app (`frontend/`) renders:
+
+- **Inline collapsible tool steps** — every Think → Act → Observe step appears live in
+  the chat; expand a card to see the exact arguments and result
+- **In-browser code approval** — `run_python` blocks server-side until you click
+  Approve/Reject (the WebSocket receiver feeds a queue the agent thread waits on)
+- **Memory indicator** — a 🧠 chip shows which long-term facts were loaded; per-question
+  recalls appear inside the turn
+- **Report viewer** — browse, read, and download the Week 4 research reports
+
+Run it (two terminals):
+
+```powershell
+# terminal 1 — backend
+venv\Scripts\uvicorn server:app --reload --port 8000
+# terminal 2 — frontend (dev, proxies /ws and /api to :8000)
+cd frontend; npm install; npm run dev    # open http://localhost:5173
+```
+
+Optional observability: set `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` in `.env`
+(free tier at smith.langchain.com) and every LLM call is traced in the dashboard.
+
+## Deployment
+
+`Dockerfile` is multi-stage: Node builds the frontend, then a Python image runs
+uvicorn and serves the built UI itself. `render.yaml` deploys it on Render's free
+tier — create the service from the repo, paste `GROQ_API_KEY` and `TAVILY_API_KEY`
+in the dashboard. (Note: the free tier's disk is ephemeral, so long-term memory and
+reports reset on redeploy.)
+
+```powershell
+docker build -t agent-lab .
+docker run -p 8000:8000 --env-file .env agent-lab   # open http://localhost:8000
+```
+
 ## Setup
 
 1. Get a **free** Groq API key (no card): https://console.groq.com → API Keys
@@ -97,4 +137,5 @@ the Act/Observe steps of the loop, made visible.
 - **Week 2 (done):** real web search (Tavily) + code execution with human approval
 - **Week 3 (done):** short-term window + long-term ChromaDB memory across sessions
 - **Week 4 (done):** LangGraph research pipeline with conditional retry branching
-- **Week 5:** FastAPI + React frontend with reasoning trace, deployment
+- **Week 5 (done):** React chat UI with live reasoning trace, in-browser code approval,
+  report viewer, memory indicator; FastAPI + WebSockets; LangSmith hook; Docker + Render

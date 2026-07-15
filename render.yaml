@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: agent-lab
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/reports
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false # paste in the Render dashboard
+      - key: TAVILY_API_KEY
+        sync: false
+      # Optional LangSmith tracing:
+      # - key: LANGSMITH_TRACING
+      #   value: "true"
+      # - key: LANGSMITH_API_KEY
+      #   sync: false
