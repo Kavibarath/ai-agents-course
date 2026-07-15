@@ -1,141 +1,216 @@
-# AI Agents Course — one project, built week by week
+# Agent Lab
 
-A single project that grows into a full research-assistant agent over 5 weeks.
-**Current status: Week 5 (complete)** — web UI with a live reasoning trace, FastAPI + WebSockets
-backend, optional LangSmith tracing, Docker + Render deployment.
+A full-stack AI research agent with **visible reasoning**: a hand-written agent loop, real tools (web search, sandboxed code execution, multi-step research), memory that survives restarts, and a React chat UI that shows every step the agent takes — which tools it called, with what arguments, and what came back — not just the final answer.
 
-## The core idea (Week 1)
+Built without agent frameworks for the core loop, so every mechanism is explicit and readable. LangGraph is used only where it earns its place: orchestrating the multi-step research pipeline.
 
-The agent loop is **Think → Act → Observe → Think again**. The LLM doesn't just
-generate text — it generates a *decision*: answer directly, or call a tool (which
-one, with what inputs)? We execute the tool, feed the result back, and the LLM
-reasons again. `agent.py` implements this loop by hand so nothing is hidden.
+## Features
 
-## Tool safety (Week 2)
+- **Hand-written agent loop** (Think → Act → Observe) — the LLM decides per question whether to answer directly or call tools; nothing is hidden behind a framework
+- **Five tools**: safe calculator, date/time, live web search (Tavily), Python code execution, and a deep-research pipeline that writes cited markdown reports
+- **Human-in-the-loop safety**: agent-written code is shown to you with Approve/Reject before it runs, in both the CLI and the browser
+- **Two-tier memory**: a windowed conversation buffer per session, plus durable facts distilled by the LLM on exit and stored in ChromaDB — tell it once that you prefer metric units, and next week it answers in kilometres
+- **Research graph**: an explicit LangGraph state machine (search → read pages → synthesize → save) with conditional retry branching
+- **Web UI**: dark chat interface with collapsible tool-trace cards, in-browser code approval, a report viewer, and a memory indicator
+- **Streaming backend**: FastAPI WebSocket that streams each loop event to the UI in real time
+- **Optional observability**: set a LangSmith key and every LLM call is traced
 
-An agent that executes code it wrote itself can do destructive things. Two defenses here:
-1. **Human-in-the-loop** — the agent loop shows you the exact code and asks `Run it? [y/N]`
-   before executing anything from `TOOLS_REQUIRING_APPROVAL`.
-2. **Process isolation + timeout** — code runs in a separate interpreter via `subprocess`
-   with a 30-second cap, so an infinite loop can't hang the agent.
-
-## Memory (Week 3)
-
-Two kinds, both hand-rolled:
-
-- **Short-term** — the running `messages` list, windowed to the last 30 messages
-  (`trim_history` in `agent.py`; the cut never lands mid tool-exchange).
-- **Long-term** — `memory.py`. On exit, the LLM distills the session into durable
-  facts ("The user prefers metric units"), embedded into a persistent ChromaDB store
-  (`memory_db/`). On startup, stored facts are injected as a user profile; once the
-  store outgrows `PROFILE_LIMIT`, per-question semantic recall takes over.
-
-**Lesson learned the hard way:** pure semantic recall fails for preferences — the
-embedding distance between "How far is Valletta from Mdina?" and "The user prefers
-metric units" is ~2.0 (unrelated), yet the preference must shape the answer. That's
-why small stores are injected wholesale and recall only supplements later — the same
-design mem0 uses.
-
-## Research graph (Week 4)
-
-`research.py` is a **graph-based agent** — the conceptual counterpart to `agent.py`'s
-ReAct loop. We define the flow as explicit nodes and edges; the LLM only fills in
-decisions at branch points:
+## Architecture
 
 ```
-START -> search -> read_pages --(readable pages?)--> synthesize -> save -> END
-            ^                        |
-            +---- refine_query <-----+  (no pages: LLM rewrites the query, max 2 rounds)
+┌───────────────┐  WebSocket   ┌──────────────┐        ┌──────────────────┐
+│  React UI     │◄────────────►│  FastAPI     │───────►│  Agent loop      │
+│  (Vite +      │  tool_call   │  server.py   │        │  agent.py        │
+│   Tailwind)   │  tool_result │              │        │  Think→Act→      │
+│               │  approval_*  │  /api/reports│        │  Observe loop    │
+│               │  final       │              │        └────────┬─────────┘
+└───────────────┘              └──────────────┘                 │
+                                                    ┌───────────┴───────────┐
+                                                    │        tools.py       │
+                                                    │ calculator  datetime  │
+                                                    │ web_search (Tavily)   │
+                                                    │ run_python (subprocess│
+                                                    │   + human approval)   │
+                                                    │ research_topic ───────┼──► research.py
+                                                    └───────────┬───────────┘    (LangGraph)
+                                                                │
+                                          ┌─────────────────────┴──────┐
+                                          │  memory.py (ChromaDB)      │
+                                          │  facts distilled on exit,  │
+                                          │  injected on startup       │
+                                          └────────────────────────────┘
 ```
 
-- **search** — Tavily, top 8 results
-- **read_pages** — trafilatura extracts article text; unreadable pages are skipped
-- **conditional edge** — zero readable pages routes back through `refine_query`
-- **synthesize** — LLM writes a cited, structured markdown report from the sources only
-- **save** — report lands in `reports/<date>-<topic>.md`
+The same `run_agent()` loop powers both interfaces: the CLI passes print/`input()` callbacks, the server passes WebSocket-send callbacks. LLM access goes through `llm.py` (Groq's OpenAI-compatible API, model `openai/gpt-oss-120b` — free tier).
 
-Run it standalone (`python research.py "your topic"`) or just ask the chat agent to
-"research X" — the graph is registered as the `research_topic` tool, so the dynamic
-agent delegates to the structured pipeline.
+## Tech stack
 
-**ReAct vs graphs:** the chat agent decides everything per turn (flexible, opaque);
-the graph guarantees search always precedes reading, capping retries and making every
-step debuggable. Real systems use both — exactly like this project now does.
+| Layer | Choice |
+|---|---|
+| LLM | `openai/gpt-oss-120b` on Groq (free tier, strong tool calling) |
+| Agent loop | Hand-written Python (`agent.py`) |
+| Research orchestration | LangGraph `StateGraph` (`research.py`) |
+| Web search | Tavily API (free tier) |
+| Page extraction | trafilatura |
+| Long-term memory | ChromaDB + local ONNX MiniLM embeddings |
+| Backend | FastAPI + WebSockets (uvicorn) |
+| Frontend | React (Vite) + Tailwind CSS v4, react-markdown |
+| Observability | LangSmith (optional) |
+| Deployment | Docker (multi-stage) + Render |
 
-## Web UI (Week 5)
+## Getting started
 
-`server.py` exposes the SAME agent loop over a WebSocket — `run_agent()` takes an
-`on_event` callback and an `approver`, so the CLI and the web UI share one loop with
-different front ends. The React app (`frontend/`) renders:
-
-- **Inline collapsible tool steps** — every Think → Act → Observe step appears live in
-  the chat; expand a card to see the exact arguments and result
-- **In-browser code approval** — `run_python` blocks server-side until you click
-  Approve/Reject (the WebSocket receiver feeds a queue the agent thread waits on)
-- **Memory indicator** — a 🧠 chip shows which long-term facts were loaded; per-question
-  recalls appear inside the turn
-- **Report viewer** — browse, read, and download the Week 4 research reports
-
-Run it (two terminals):
+**Prerequisites:** Python 3.12+, Node 20+, and two free API keys:
+- Groq: https://console.groq.com → API Keys (no card required)
+- Tavily: https://app.tavily.com (1000 searches/month free)
 
 ```powershell
-# terminal 1 — backend
-venv\Scripts\uvicorn server:app --reload --port 8000
-# terminal 2 — frontend (dev, proxies /ws and /api to :8000)
-cd frontend; npm install; npm run dev    # open http://localhost:5173
-```
+git clone https://github.com/Kavibarath/ai-agents-course.git
+cd ai-agents-course
 
-Optional observability: set `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` in `.env`
-(free tier at smith.langchain.com) and every LLM call is traced in the dashboard.
-
-## Deployment
-
-`Dockerfile` is multi-stage: Node builds the frontend, then a Python image runs
-uvicorn and serves the built UI itself. `render.yaml` deploys it on Render's free
-tier — create the service from the repo, paste `GROQ_API_KEY` and `TAVILY_API_KEY`
-in the dashboard. (Note: the free tier's disk is ephemeral, so long-term memory and
-reports reset on redeploy.)
-
-```powershell
-docker build -t agent-lab .
-docker run -p 8000:8000 --env-file .env agent-lab   # open http://localhost:8000
-```
-
-## Setup
-
-1. Get a **free** Groq API key (no card): https://console.groq.com → API Keys
-2. Get a **free** Tavily API key (1000 searches/month): https://app.tavily.com
-3. Then:
-
-```powershell
-cd E:\agents-course
+# Backend
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate          # Linux/macOS: source venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env   # then paste your real keys into .env
+copy .env.example .env          # then paste your real keys into .env
+
+# Frontend
+cd frontend
+npm install
+cd ..
+```
+
+### Run the web UI (development)
+
+Two terminals:
+
+```powershell
+# 1 — backend
+uvicorn server:app --reload --port 8000
+
+# 2 — frontend with hot reload
+cd frontend
+npm run dev
+```
+
+Open **http://localhost:5173** (Vite proxies `/ws` and `/api` to the backend).
+
+### Run the web UI (single server)
+
+```powershell
+cd frontend
+npm run build
+cd ..
+uvicorn server:app --port 8000
+```
+
+Open **http://localhost:8000** — FastAPI serves the built UI, the API, and the WebSocket from one process.
+
+### Run the CLI instead
+
+```powershell
 python agent.py
 ```
 
-## Try these
+Same agent, same memory, tool trace printed inline, `exit` to quit.
 
-| Prompt | Expected behavior |
+### Run a research job directly
+
+```powershell
+python research.py "latest trends in health data analytics"
+```
+
+Saves a cited markdown report to `reports/` with no further input.
+
+## Things to try
+
+| Prompt | What you'll see |
 |---|---|
-| `What is 847 × 23?` | Calls `calculator` → answers 19481 (computed, not guessed) |
-| `What's today's date?` | Calls `get_current_datetime` (not training data) |
-| `What are the latest AI news?` | Calls `web_search` → real headlines with source URLs |
-| `What is the capital of France?` | **No tool call** — it decides tools aren't needed |
-| `Current population of Malta, and at 3%/year growth, what is it in 10 years?` | **Chains tools**: `web_search` for the real number, then `run_python` (you approve the code) for the projection |
-| Session 1: `Remember that I prefer metric units` → exit. Session 2: `How far is Valletta from Mdina?` | On exit: `[saved] The user prefers metric units.` On restart: `[memory] loaded 1 fact(s)` → answers in **km** without being told |
-| `Research the latest trends in health data analytics` | Delegates to the LangGraph pipeline → cited markdown report saved in `reports/`, no further input needed |
+| `What is 847 × 23?` | A `calculator` trace card → 19481, computed rather than guessed |
+| `What's today's date?` | The datetime tool — not stale training data |
+| `What are the latest AI news?` | Live Tavily search with source URLs |
+| `What is the capital of France?` | **No tool call at all** — the agent decides tools aren't needed |
+| `Write Python to find the 3 largest primes below 1000` | The code appears with **Approve & run / Reject** buttons; nothing executes without you |
+| `Research the pros and cons of intermittent fasting` | The research graph runs (search → read → synthesize) and the report opens from the 📄 reports panel |
+| `Remember that I prefer metric units` → restart → `How far is Valletta from Mdina?` | The 🧠 memory chip shows the recalled fact; the answer comes back in kilometres |
 
-The `[tool]` / `[result]` lines printed between your question and the answer are
-the Act/Observe steps of the loop, made visible.
+## How it works
 
-## Roadmap
+### The agent loop
 
-- **Week 1 (done):** agent loop + calculator, datetime, web-search stub
-- **Week 2 (done):** real web search (Tavily) + code execution with human approval
-- **Week 3 (done):** short-term window + long-term ChromaDB memory across sessions
-- **Week 4 (done):** LangGraph research pipeline with conditional retry branching
-- **Week 5 (done):** React chat UI with live reasoning trace, in-browser code approval,
-  report viewer, memory indicator; FastAPI + WebSockets; LangSmith hook; Docker + Render
+Each turn, the model receives the conversation plus JSON schemas describing the tools. It responds either with text (done) or with structured tool calls. The loop executes each call, appends the result as a `tool` message, and asks the model again — repeating until it answers in text (capped at 10 iterations). Tool errors are returned *to the model* as results so it can recover instead of crashing. Malformed tool calls (an occasional model failure mode) are retried up to 3 times.
+
+### Tool safety
+
+Code the agent writes is (1) gated behind explicit human approval — the loop blocks until you decide — and (2) executed in a separate interpreter via `subprocess` with a 30-second timeout, so an infinite loop can't hang the agent. The calculator similarly avoids `eval()` in favour of a whitelisted AST evaluator.
+
+### Memory
+
+Short-term memory is the running message list, trimmed to the last 30 messages (never cutting between a tool call and its result). Long-term memory: when a session ends, the LLM distills the transcript into durable third-person facts, which are embedded into a persistent ChromaDB store. On startup, stored facts are injected into the system prompt as a user profile.
+
+Why inject rather than retrieve? Semantic search fails for preferences — the embedding distance between *"How far is Valletta from Mdina?"* and *"The user prefers metric units"* is ~2.0, effectively unrelated, yet the preference must shape the answer. So small stores are injected wholesale, and per-question semantic recall only takes over once the store outgrows the profile (the same design mem0 uses).
+
+### The research graph
+
+`research.py` is the architectural counterpart to the chat agent — a graph where *we* define the flow and the LLM fills in decisions at branch points:
+
+```
+START → search → read_pages ──(readable pages?)──► synthesize → save → END
+           ▲                        │
+           └──── refine_query ◄─────┘  (none readable: LLM rewrites the
+                                        query; max 2 search rounds)
+```
+
+Unreadable pages (paywalls, JS-heavy sites) are skipped; if nothing is readable, the conditional edge routes back through an LLM query-rewrite. The synthesizer is restricted to the extracted source material and must cite URLs inline. The chat agent can delegate to this graph via the `research_topic` tool — a dynamic ReAct-style agent calling a structured pipeline, which is how production systems typically combine the two patterns.
+
+### The WebSocket protocol
+
+The server streams typed JSON events per turn: `tool_call`, `tool_result`, `approval_request` (the UI answers with `approval_response`), `memory_loaded` / `memory_recalled`, `retry`, and `final`. The UI renders these as live collapsible trace cards. The synchronous agent loop runs in a worker thread; approvals bridge back through a thread-safe queue.
+
+## Project structure
+
+```
+agent.py        agent loop + CLI (event/approver callbacks shared with the server)
+tools.py        tool implementations + JSON schemas + approval registry
+memory.py       ChromaDB long-term memory (extract / save / profile / recall)
+research.py     LangGraph research pipeline
+llm.py          shared LLM client (Groq) + optional LangSmith wrapper
+server.py       FastAPI: WebSocket streaming, reports API, static frontend
+frontend/       React app (components: ToolStep, ApprovalCard, ReportsPanel, Markdown)
+reports/        generated research reports (markdown)
+memory_db/      ChromaDB store (gitignored)
+```
+
+## Configuration
+
+`.env` (see `.env.example`):
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `GROQ_API_KEY` | yes | LLM calls |
+| `TAVILY_API_KEY` | yes | Web search |
+| `LANGSMITH_API_KEY` | no | Traces every LLM call to a LangSmith dashboard |
+| `LANGSMITH_TRACING` | no | Set `true` alongside the key |
+
+## Deployment
+
+**Docker (anywhere):**
+
+```bash
+docker build -t agent-lab .
+docker run -p 8000:8000 --env-file .env agent-lab
+```
+
+The multi-stage build compiles the React app with Node, then packages a slim Python image that serves everything on one port.
+
+**Render:** the repo includes `render.yaml` — create a new Blueprint service pointing at this repo, paste `GROQ_API_KEY` and `TAVILY_API_KEY` in the dashboard, and deploy. The free tier works (cold starts after idle are normal).
+
+## Limitations
+
+- Sessions are single-user: each WebSocket connection gets its own conversation, but the long-term memory store is shared and unauthenticated
+- Free-tier rate limits (Groq requests/min, Tavily searches/month) apply
+- `run_python` executes on the host after your approval — isolation is a subprocess + timeout, not a container sandbox; review code before approving
+
+---
+
+*Built step by step as a learning project — the commit history walks from a bare agent loop to the full stack.*
